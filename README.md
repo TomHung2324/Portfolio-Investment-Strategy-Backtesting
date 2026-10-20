@@ -26,7 +26,7 @@ This project compares nine U.S. sector ETF allocation strategies against the SPY
 
 ## Project files
 
-The project source is `port_invest.qmd` and the companion functions are in `portfolio_helpers.R`. Both are expected in the same directory as `SPDR/` and `F-F_Research_Data_Factors_Daily_CSV.rds`. The Quarto report writes strategy metrics, selections and figures to the working directory. See the `report/` and `presentation/` folders once added.
+The intended repository contents are the main Quarto source (`port_invest.qmd`), its R helper (`portfolio_helpers.R`), and the final PDF report (`report/FN6901_Portfolio_Investment_Back-testing.pdf`). The original ETF and Fama–French data snapshots are not included. The report is viewable without R; reproducing the backtest requires the original datasets.
 
 ## Reproduce
 
@@ -36,7 +36,7 @@ Install R, Quarto and the packages loaded at the top of `port_invest.qmd` (`conf
 quarto render port_invest.qmd --to html
 ```
 
-The source assumes relative paths. Keep the `SPDR/` folder adjacent to the `.qmd`, and check that the Fama–French factor snapshot is present. The dataset may require separate distribution permission before making this repository public.
+The source assumes relative paths. To reproduce, place the `SPDR/` folder and `F-F_Research_Data_Factors_Daily_CSV.rds` next to the `.qmd`. These input data files are intentionally omitted from the compact portfolio showcase.
 
 ## Interpretation and limitations
 
@@ -44,4 +44,4 @@ Annual equal-weight rebalancing had the strongest historical CAGR and assignment
 
 ## Attribution
 
-Developed as part of the **FN6901 group assignment**. The portfolio-investment component was prepared by **Shuo Yan Hung** with assistance from ChatGPT for coding, documentation and presentation drafting. Other contributors and reviewer credits should be confirmed before public release. Course materials and data remain subject to their respective licensing and sharing rules.
+**Portfolio Investment** was the component independently assigned to and completed by **Shuo Yan Hung** within the FN6901 group assignment. ChatGPT assisted with coding, documentation and presentation drafting. Course materials and underlying data remain subject to their respective sharing rules.
