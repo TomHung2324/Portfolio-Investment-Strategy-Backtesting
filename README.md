@@ -6,6 +6,8 @@ This project compares nine U.S. sector ETF allocation strategies against the SPY
 
 ## Backtest results
 
+[View the full backtesting report (PDF)](report/FN6901_Portfolio_Investment_Back-testing.pdf)
+
 | Strategy | CAGR | Annualized volatility | Sharpe* | Maximum drawdown | Terminal wealth ($1 initial) |
 |---|---:|---:|---:|---:|---:|
 | SPY | 7.47% | 19.64% | 0.3805 | -55.20% | 4.8480 |
