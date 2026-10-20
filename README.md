@@ -44,4 +44,4 @@ Annual equal-weight rebalancing had the strongest historical CAGR and assignment
 
 ## Attribution
 
-**Portfolio Investment** was the component independently assigned to and completed by **Shuo Yan Hung** within the FN6901 group assignment. ChatGPT assisted with coding, documentation and presentation drafting. Course materials and underlying data remain subject to their respective sharing rules.
+**Portfolio Investment** was the component independently assigned to and completed by **Shuo Yan Hung** within the FN6901 group assignment.Course materials and underlying data remain subject to their respective sharing rules.
