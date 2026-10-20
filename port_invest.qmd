@@ -1,0 +1,630 @@
+---
+title: "Portfolio Investment Assignment"
+subtitle: "FN6901 Group Assignment"
+date: today
+author: "Portfolio Investment Team — Author: Hung Shuo Yan"
+cache: false
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-location: left
+    toc-depth: 3
+    toc-title: "Contents"
+    toc-expand: 2
+    smooth-scroll: true
+    code-tools: true
+    df-print: paged
+    fig-width: 6
+    fig-height: 4
+    fig-align: center
+    embed-resources: true
+---
+
+```{r}
+#| label: setup
+#| echo: false
+#| warning: false
+#| message: false
+library(conflicted)
+library(tidyverse)
+library(lubridate)
+library(kableExtra)
+library(frenchdata)
+library(patchwork)
+conflict_prefer("lag", "dplyr")
+conflict_prefer("filter", "dplyr")
+options(dplyr.summarise.inform = FALSE)
+knitr::opts_chunk$set(
+  cache = FALSE,
+  dev = "svg",
+  fig.width = 8,
+  fig.height = 5
+)
+source("portfolio_helpers.R")
+cat("Render working directory:", getwd(), "\n")
+```
+
+# 0. Synopsis
+
+- This is a backtesting exercise for investment of a stock portfolio.
+- There are various types of backtesting: vectorized, event-based, etc. We use a hybrid method of vectorized and event-based. The trading signal is generated row-by-row (i.e. day-by-day) while the return is calculated in vector to speed up.
+- In a nutshell, the value of the portfolio is calculated with following pipeline.
+
+$$
+\left.\begin{matrix}
+\text{Strategy Signal (Picker / Re-balance)} \rightarrow \text{Allocation (weights)} \\
+\text{Price} \rightarrow \text{Return} \\
+\text{Return} \rightarrow \text{Cumulative Return} \\
+\end{matrix}\right\}\rightarrow
+\text{Value of the portfolio}
+$$
+
+- Disclaimer: this is not investment advice.
+
+# 1. Overview
+
+- SPDR sector ETFs divide the S&P 500 into eleven sector index funds. <https://www.sectorspdrs.com/>. Vanguard has similar ETF <https://investor.vanguard.com/investment-products/list/etfs?assetclass=sector_specialty>
+- We chose 9 among them and `SPY`, which is the S&P ETF.
+- Investment horizon, long-term from 1999-11-01 to 2021-10-08 (fixed by design; all numbers quoted in this template are from the pre-downloaded snapshot that ends Oct 2021).
+- Strategy:
+  - Equal-weighted with 1) no re-balance, 2) quarterly re-balance, 3)
+    annual re-balance
+  - Picker by alpha from Fama-French 3 factor model
+- Note:
+  - All equity position, no cash while invested (the Fama-French strategy in section 4 holds cash during its first three months' warm-up).
+  - Do not load other library, use only the listed packages here.
+    - Submit qmd and the data files together
+  - Use adjusted_close.
+
+SPDR funds are managed by State Street Global Advisors (SSGA) with SPDR a trademark of Standard and Poor's Financial Services LLC, a subsidiary of S&P Global. SPDR originally stood for "Standard & Poor's Depositary Receipts".
+
+For a long time, SPDR S&P 500 Trust ETF (SPY) was the largest ETF in the world. The sector ETFs divide the S&P 500 companies to attract investors for sector-specific investments. There are following ETFs and their industries.
+
+- XLC: Communication Services Select Sector SPDR
+- XLB: Materials Select Sector SPDR
+- XLE: Energy Select Sector SPDR
+- XLF: Financial Select Sector SPDR
+- XLI: Industrial Select Sector SPDR
+- XLK: Technology Select Sector SPDR
+- XLP: Consumer Staples Select Sector SPDR
+- XLU: Utilities Select Sector SPDR
+- XLV: Health Care Select Sector SPDR
+- XLRE: Real Estate Select Sector SPDR
+- XLY: Consumer Discretionary Select Sector SPDR
+
+Vanguard, another large mutual fund and ETF provider, has a similar range.
+
+- VOX: Communication Services ETF
+- VCR: Consumer Discretionary ETF
+- VDC: Consumer Staples ETF
+- VDE: Energy ETF
+- VFH: Financials ETF
+- VHT: Health Care ETF
+- VIS: Industrials ETF
+- VGT: Information Technology ETF
+- VAW: Materials ETF
+- VNQ: Real Estate ETF
+- VPU: Utilities ETF
+- VTI: Vanguard Total Stock Market ETF (similar to SPY)
+
+We will use SPDR's data in this exercise.
+
+## 1.1 Use downloaded data
+
+Data have been pre-downloaded.
+
+```{r}
+#| label: use-downloaded-data
+# "XLC", "XLRE" has shorter history, skip them.
+all_tickers <- c(
+  "XLB",
+  "XLE",
+  "XLF",
+  "XLI",
+  "XLK",
+  "XLP",
+  "XLU",
+  "XLV",
+  "XLY",
+  "SPY"
+)
+
+length(all_tickers)
+
+path_to_rds <- "./SPDR/"
+```
+
+## 1.2 Load and check
+
+```{r}
+#| label: load-and-check
+# make sure all starts from the same time and same length.
+# load each data as df_xxx
+
+dd <- list()
+dd_adjusted_close <- list()
+for (tt in all_tickers) {
+  dd[[tt]] <- readRDS(paste0(path_to_rds, tt, ".Rds"))
+  dd_adjusted_close[[tt]] <- dd[[tt]] %>%
+    select(adjusted_close) %>%
+    rename_with(
+      .fn = \(x) tt,
+      .cols = "adjusted_close"
+    )
+  print(paste(
+    tt,
+    min(dd[[tt]]$timestamp),
+    max(dd[[tt]]$timestamp),
+    nrow(dd[[tt]])
+  ))
+  stopifnot(min(dd[[tt]]$timestamp) == as.Date("1999-11-01"))
+  assign(paste0("df_", tolower(tt)), dd[[tt]], envir = .GlobalEnv)
+}
+(df_all <- bind_cols(
+  select(dd[[tt]], timestamp),
+  do.call("bind_cols", dd_adjusted_close)
+))
+
+# Last row with return from each ETF
+tail(df_all, 1) %>%
+  select(!timestamp) /
+  head(df_all, 1) %>% select(!timestamp) -
+  1
+```
+
+## 1.3 Background of last 20 years: Energy vs. Technology
+
+- Energy led in the 2000s as oil rose to about \$147/bbl in July 2008, then fell sharply in the GFC.
+- Technology fell hard in the dot-com crash of 2000-2002, then led the market after 2009.
+- Every sector has its peak and trough.
+
+```{r}
+#| label: background-of-last-20-years-energy-vs-technology
+#| fig-width: 6
+p1 <- df_all %>%
+  select(!SPY) %>%
+  pivot_longer(cols = !timestamp) %>%
+  ggplot(.) +
+  geom_line(aes(timestamp, value, colour = name))
+
+p2 <- df_all %>%
+  select(timestamp, XLE, XLK) %>%
+  pivot_longer(cols = !timestamp) %>%
+  ggplot(.) +
+  geom_line(aes(timestamp, value, colour = name))
+
+p1 / p2
+```
+
+# 2. Equal-weighted Strategy (no re-balance)
+
+Equal-weighted portfolio, also called `1/N` is a common non-biased strategy for asset allocation weight. With re-balance, it can show good performance over long term. We will do a no re-balance version first.
+
+## 2.1 Compute daily return series
+
+```{r}
+#| label: compute-daily-return-series
+len_tickers <- length(all_tickers)
+ii <- 1
+daily_ret <- tail(tibble(Date = dd[[1]]$timestamp), -1)
+# XXX records each ETF's daily return
+# We use SIMPLE returns: r_t = P_t / P_{t-1} - 1.
+# Do NOT switch to log returns here - the cumulative return calculation below
+# uses cumprod(1 + r), which requires simple returns. Log returns would give
+# incorrect portfolio values when compounded.
+for (ii in 1:len_tickers) {
+  daily_ret[all_tickers[ii]] <- tail(
+    dd[[ii]]$adjusted_close / lag(dd[[ii]]$adjusted_close, 1) - 1,
+    -1
+  )
+}
+# XXX_cumret records each ETF's cumulative return
+for (ii in 1:len_tickers) {
+  daily_ret[paste0(all_tickers[ii], "_cumret")] <- cumprod(
+    1 + daily_ret[[all_tickers[ii]]]
+  )
+}
+head(daily_ret)
+```
+
+## 2.2 Performance
+
+### 2.2.1 Calculate Equity Curve (no re-balance)
+
+`w` is the weight of each ETF in the portfolio.
+
+```{r}
+#| label: calculate-equity-curve-no-re-balance
+invest_tickers <- all_tickers[all_tickers != "SPY"]
+len_invest <- length(invest_tickers)
+w <- rep(1, len_invest) / len_invest
+cat(paste0("w: ", paste0(round(w, 3), collapse = ",")))
+```
+
+```{r}
+#| label: calculate-equity-curve-no-re-balance-2
+#| fig-height: 3
+# Test
+# daily_ret %>% select(XLB_cumret:XLY_cumret) %>% tail(1) %>% as.matrix() %>% mean()
+
+# We convert part of the data frame as matrix, perform the matrix multiplication and convert the matrix back to vector.
+ew_cumret <- as.numeric(
+  as.matrix(daily_ret %>% select(XLB_cumret:XLY_cumret)) %*% w
+)
+
+ret_from_cumret <- function(cumret) {
+  ret <- cumret / lag(cumret) - 1
+  # filling the NA
+  ret[1] <- cumret[1] - 1
+  ret
+}
+
+# Test
+# ret_from_cumret(daily_ret$XLB_cumret) - daily_ret$XLB
+
+ew_ret <- ret_from_cumret(ew_cumret)
+
+daily_ret["EW_cumret"] <- ew_cumret
+daily_ret["EW"] <- ew_ret
+
+daily_ret %>%
+  ggplot(.) +
+  geom_line(aes(Date, EW_cumret)) +
+  ggtitle("EW (no re-balance) Equity Curve")
+```
+
+### 2.2.2 Relative Performance between SPY vs. EW (no re-balance)
+
+1.  Daily return for SPY vs. EW
+
+```{r}
+#| label: relative-performance-between-spy-vs-ew-no-re-balance
+#| fig-height: 3
+# EW (no re-balance) has similar return as SPY
+ggplot(daily_ret) +
+  geom_point(aes(SPY, EW)) +
+  ggtitle("SPY vs EW")
+```
+
+2.  Cumulative return for SPY vs. EW (no re-balance)
+
+```{r}
+#| label: relative-performance-between-spy-vs-ew-no-re-balance-2
+#| fig-height: 3
+# EW (no re-balance) has similar return as SPY, but higher.
+
+daily_ret %>%
+  ggplot(.) +
+  geom_line(aes(Date, SPY_cumret, color = "SPY")) +
+  geom_line(aes(Date, EW_cumret, color = "EW")) +
+  ggtitle("SPY vs EW (no re-balance) Equity Curve") +
+  labs(color = "Curve") +
+  scale_color_manual(values = c("SPY" = "black", "EW" = "red"))
+```
+
+### 2.2.3 Performance metrics
+
+We use **CAGR** as annualized return, and the assignment's convention of CAGR divided by annualized daily volatility for the Sharpe ratio (risk-free rate assumed zero). Maximum drawdown is the worst percentage loss from a prior peak, including initial wealth of 1.
+
+```{r}
+#| label: completed-baseline-metrics
+baseline_metrics <- bind_rows(
+  performance_metrics(daily_ret$EW, "EW Buy & Hold"),
+  performance_metrics(daily_ret$SPY, "SPY"))
+knitr::kable(baseline_metrics, digits = 4)
+```
+
+### 2.2.4 ETF P&L contribution and risk ranking
+
+Because initial wealth is 1 and each ETF receives 1/9, its dollar P&L contribution equals `(terminal ETF wealth - 1) / 9`. Individual ETF drawdowns are measured from their own total-return paths.
+
+```{r}
+#| label: completed-etf-rankings
+etf_stats <- tibble(
+  ETF = invest_tickers,
+  PnL_Contribution = vapply(invest_tickers, function(t) (tail(daily_ret[[paste0(t, "_cumret")]], 1)-1)/len_invest, numeric(1)),
+  Max_Drawdown = vapply(invest_tickers, function(t) max_drawdown(daily_ret[[paste0(t, "_cumret")]]), numeric(1)))
+pnl_rank <- etf_stats %>% arrange(desc(PnL_Contribution))
+risk_rank <- etf_stats %>% arrange(Max_Drawdown)
+knitr::kable(pnl_rank, digits = 4, caption = "ETF contributions to buy-and-hold P&L")
+knitr::kable(risk_rank, digits = 4, caption = "ETF risk: worst drawdown first")
+
+p_pnl <- ggplot(pnl_rank, aes(reorder(ETF, PnL_Contribution), PnL_Contribution)) +
+  geom_col(fill = "#2678A9") + coord_flip() +
+  labs(title = "ETF Contribution to Portfolio P&L", x = NULL, y = "P&L per $1 initial portfolio") + theme_minimal()
+p_risk <- ggplot(risk_rank, aes(reorder(ETF, Max_Drawdown), Max_Drawdown)) +
+  geom_col(fill = "#D97755") + coord_flip() +
+  labs(title = "ETF Maximum Drawdown", x = NULL, y = "Peak-to-trough loss") + theme_minimal()
+p_pnl / p_risk
+```
+
+# 3. EW with Re-balance
+
+Re-balance is an action to reset the weights so the allocation into each ETF has equal market value.
+
+Without re-balance, some ETFs can grow their value to a certain extent that reduces the diversification of our investment portfolio.
+
+- The starting allocation for each ETF is 1/9.
+- On the next re-balance day, calculate the value of the portfolio.
+  For example, it has grown to 1.3 based on each ETF's relative return during the previous period.
+- The allocation for each ETF becomes 1.3/9.
+
+If there is no re-balance (as shown earlier), weight is multiplied to
+the each ETF's cumulative return. This is like that we allocated the
+capital equally on day 1 and future value is always 1/n \* cumulative
+return. The overall cumulative return is the average of all ETFs' cumulative returns.
+
+If we re-balance every day (a special case), weight is multiplied to each ETF's daily return.
+This is as if we equally divide the capital allocation for each
+ETF so the overall daily return is the averaged daily returns of all
+ETFs.
+
+## 3.1 Re-balance everyday (a special case)
+
+With the pre-downloaded data, it has improved over the no re-balance version from 7.8% to 8.6% annualized return (252 trading days per year).
+
+```{r}
+#| label: re-balance-everyday-a-special-case
+#| fig-height: 4
+daily_ret["EW_daily"] <- as.matrix(daily_ret %>% select(XLB:XLY)) %*% w
+daily_ret["EW_daily_cumret"] <- cumprod(
+  daily_ret[, "EW_daily", drop = TRUE] + 1
+)
+
+p1 <- daily_ret %>% ggplot(.) + geom_line(aes(Date, EW_daily))
+p2 <- daily_ret %>% ggplot(.) + geom_point(aes(EW, EW_daily))
+
+p1 / p2
+```
+
+```{r}
+#| label: re-balance-everyday-a-special-case-2
+# annualized return for EW_daily, higher than EW (no re-balance)
+prod(daily_ret$EW_daily + 1)**(252 / length(daily_ret$EW_daily)) - 1
+```
+
+## 3.2 Re-balance generalized
+
+Step 1: Calculate the dates for the re-balance.
+
+The re-balance could happen at fixed time intervals. To simplify the
+calculation, we set the last re-balance day to happen on the last
+day (the re-balance on the last day would not have impact to the profit
+or loss) and derive the earlier re-balance days backward. I have written
+the custom function `calc_rebal_days()` to obtain the
+`rebal_days` vector. They are the n-th days on which re-balance is applied.
+
+```{r}
+#| label: re-balance-generalized
+calc_rebal_days <- function(nn, period) {
+  rev(nn - (0:(round(nn / period, 0) - 1)) * period)
+}
+
+# Quarterly re-balance
+# every 63 trading days (21 days per month x 3 months)
+rebal_days <- calc_rebal_days(nrow(daily_ret), 63)
+head(rebal_days)
+
+# Annual re-balance
+# every 252 trading days (21 days per month x 12 months)
+rebal_days <- calc_rebal_days(nrow(daily_ret), 252)
+head(rebal_days)
+```
+
+Step 2: generalized code to calculate return from allocation and re-balance
+
+Data frame `daily_ret` is composed of `Date`, `daily return matrix from XLB:XLY`, SPY, `cumret matrix from XLB:XLY` and EW results.
+
+Previous `cumret` is directly calculated from each ETF's daily return. With re-balance, `cumret` that records every ETF's daily cumulative return in our portfolio will be calculated differently.
+
+We use a variable `prev_cumret` to record the previous day's `cumret`.
+
+Each row of `cumret` matrix is calculated from `prev_cumret * (1 + daily_return of each ETF)`.
+
+When re-balance happens, we take that row of `cumret` and equalize each to be `1/N` of the row's sum.
+
+Below illustrates the row-by-row changes to `cumret` and `prev_cumret`, assuming we have 4 ETFs and we are initially 50/50 only in the first two.
+
+```text
+  | cumret              | prev_cumret
+                        | 0.5  0.5  0.0  0.0
+1 | 0.4  0.6  0.0  0.0  | 0.4  0.6  0.0  0.0 <= daily
+2 | 0.6  0.8  0.0  0.0  | 0.7  0.7  0.0  0.0 <= re-balance
+3 | 0.8  0.6  0.0  0.0  | 0.0  0.0  0.7  0.7 <= switch ETF (implicit re-balance)
+4 | 0.0  0.0  0.6  0.7  | 0.0  0.0  0.6  0.7
+```
+
+![](img/cumret.png)
+
+```{r}
+#| label: re-balance-generalized-2
+#| fig-height: 4
+# loc_cumret_matrix is where we have stored cumret for each ETF. We will re-write these columns' content.
+
+loc_XLB <- which(colnames(daily_ret) == "XLB")
+loc_XLY <- which(colnames(daily_ret) == "XLY")
+loc_ret_matrix <- loc_XLB:loc_XLY
+
+loc_XLB_cumret <- which(colnames(daily_ret) == "XLB_cumret")
+loc_XLY_cumret <- which(colnames(daily_ret) == "XLY_cumret")
+loc_cumret_matrix <- loc_XLB_cumret:loc_XLY_cumret
+
+row_daily_ret <- nrow(daily_ret)
+
+# We set to re-balance every day, hope to reproduce the same result as in ## 3.1
+rebal_days <- 1:row_daily_ret
+w0 <- w
+for (ii in 1:row_daily_ret) {
+  if (ii == 1) {
+    prev_cumret <- matrix(w0, 1, len_invest)
+  }
+  daily_ret[ii, loc_cumret_matrix] <- prev_cumret *
+    as.matrix(1 + daily_ret[ii, loc_ret_matrix])
+
+  if (ii %in% rebal_days) {
+    # when re-balance, multiple weights with cumret
+    port_sum <- sum(daily_ret[ii, loc_cumret_matrix])
+    daily_ret[ii, loc_cumret_matrix] <- matrix(
+      rep(port_sum, len_invest) / len_invest,
+      1,
+      len_invest
+    )
+  }
+  prev_cumret <- as.matrix(daily_ret[ii, loc_cumret_matrix])
+}
+
+
+# EW_loop_cumret matches EW_daily_cumret. And EW_loop matches EW_daily.
+daily_ret["EW_loop_cumret"] <- rowSums(as.matrix(daily_ret[loc_cumret_matrix]))
+daily_ret["EW_loop"] <- ret_from_cumret(daily_ret[,
+  "EW_loop_cumret",
+  drop = TRUE
+])
+
+p1 <- daily_ret %>% ggplot(.) + geom_line(aes(Date, EW_loop_cumret))
+p2 <- daily_ret %>% ggplot(.) + geom_line(aes(Date, EW_loop))
+
+p1 / p2
+```
+
+## 3.3 Quarterly and annual rebalancing — completed
+
+We retain the original 63- and 252-trading-day convention. Trades occur **after** the close of the designated day, and thus affect returns from the next day onward. No transaction costs are assumed.
+
+```{r}
+#| label: completed-rebalancing
+ret_matrix <- as.matrix(daily_ret[, invest_tickers])
+n_days <- nrow(ret_matrix)
+quarterly_days <- calc_rebal_days(n_days, 63)
+annual_days <- calc_rebal_days(n_days, 252)
+quarterly <- backtest_equal_weight(ret_matrix, quarterly_days)
+annual <- backtest_equal_weight(ret_matrix, annual_days)
+stopifnot(max(abs(backtest_equal_weight(ret_matrix)$equity - daily_ret$EW_cumret)) < 1e-8)
+strategy_returns <- tibble(Date = daily_ret$Date, SPY = daily_ret$SPY,
+  EW_Buy_Hold = daily_ret$EW, EW_Quarterly = quarterly$returns,
+  EW_Annual = annual$returns)
+rebalance_metrics <- bind_rows(
+  performance_metrics(daily_ret$SPY, "SPY"),
+  performance_metrics(daily_ret$EW, "EW Buy & Hold"),
+  performance_metrics(quarterly$returns, "EW Quarterly"),
+  performance_metrics(annual$returns, "EW Annual"))
+knitr::kable(rebalance_metrics, digits = 4)
+```
+
+```{r}
+#| label: completed-rebalancing-figures
+strategy_equity <- strategy_returns %>%
+  mutate(across(-Date, ~ cumprod(1 + .x))) %>%
+  pivot_longer(-Date, names_to = "Strategy", values_to = "Wealth")
+ggplot(strategy_equity, aes(Date, Wealth, color = Strategy)) +
+  geom_line(linewidth = .65) + theme_minimal() +
+  labs(title = "Equity Curves: Rebalancing vs. Buy & Hold", y = "Growth of $1")
+```
+
+# 4. Fama-French Selection
+
+This allocation method is based on Fama-French's data.
+
+For every month, obtain the alpha of the ETF for its last 3 months' excess return with Fama-French 3 factors. Allocate investment equally to the top 5 ETFs of the largest alpha.
+
+Implement above allocation scheme and perform similar analysis as \## 2.2 Performance. Analyze the reason for different performance between this strategy to EW (quarterly re-balanced).
+
+You can assume 21 days per month. Specification:
+
+- On each re-balance day `x`, fit on the trailing 63 days up to and including day `x`. The new weights apply from day `x + 1`.
+- Assume zero transaction cost.
+- `rebal_days` counts back from the last day, so its values are 18, 39, 60, 81, .... The first re-balance day with a full 63-day window is day 81. Hold all cash until then.
+
+### Implementation and results
+
+We use the **provided factor snapshot** to ensure reproducibility, not a live download. Factor values in the file are percentages, so we divide by 100 once. The first eligible rebalance day is row 81 (the day sequence counts back from the last observation). We hold cash until that day and first invest on the **following** return observation.
+
+```{r}
+#| label: completed-fama-french
+ff_raw <- readRDS("F-F_Research_Data_Factors_Daily_CSV.rds")
+ff_raw$date <- as.Date(ff_raw$date)
+market_col <- intersect(c("Mkt-RF", "Mkt.RF", "MKT", "Mkt_RF"), names(ff_raw))[1]
+stopifnot(length(market_col) == 1, !is.na(market_col))
+ff_clean <- tibble(Date = ff_raw$date,
+  MKT = as.numeric(ff_raw[[market_col]]) / 100,
+  SMB = as.numeric(ff_raw$SMB) / 100,
+  HML = as.numeric(ff_raw$HML) / 100,
+  RF = as.numeric(ff_raw$RF) / 100)
+ff_aligned <- left_join(tibble(Date = daily_ret$Date), ff_clean, by = "Date")
+stopifnot(nrow(ff_aligned) == nrow(daily_ret))
+monthly_days <- calc_rebal_days(n_days, 21)
+stopifnot(min(monthly_days[monthly_days >= 63]) == 81)
+ff_strategy <- backtest_ff(ret_matrix, ff_aligned, monthly_days, invest_tickers)
+strategy_returns$FF_Top5 <- ff_strategy$returns
+all_metrics <- bind_rows(rebalance_metrics,
+  performance_metrics(ff_strategy$returns, "FF Alpha Top 5"))
+knitr::kable(all_metrics, digits = 4, caption = "Full-sample strategy comparison")
+write.csv(all_metrics, "portfolio_metrics.csv", row.names = FALSE)
+write.csv(etf_stats, "etf_ranking.csv", row.names = FALSE)
+write.csv(ff_strategy$selection, "ff_selections.csv", row.names = FALSE)
+write.csv(ff_strategy$alpha_history, "ff_alpha_history.csv", row.names = FALSE)
+```
+
+```{r}
+#| label: completed-full-equity
+all_equity <- strategy_returns %>% mutate(across(-Date, ~cumprod(1 + .x))) %>%
+  pivot_longer(-Date, names_to = "Strategy", values_to = "Wealth")
+p_equity <- ggplot(all_equity, aes(Date, Wealth, color = Strategy)) +
+  geom_line(linewidth = .7) + theme_minimal() +
+  labs(title = "Full Strategy Comparison", y = "Growth of $1", x = NULL)
+print(p_equity)
+ggsave("equity_curves.png", p_equity, width = 11, height = 6, dpi = 180)
+```
+
+```{r}
+#| label: completed-drawdown
+all_drawdown <- strategy_returns %>%
+  mutate(across(-Date, ~ { wealth <- cumprod(1 + .x); wealth / cummax(c(1, wealth))[-1] - 1 })) %>%
+  pivot_longer(-Date, names_to = "Strategy", values_to = "Drawdown")
+p_drawdown <- ggplot(all_drawdown, aes(Date, Drawdown, color = Strategy)) +
+  geom_line(linewidth = .6) + theme_minimal() +
+  labs(title = "Drawdown by Strategy", y = "Drawdown", x = NULL)
+print(p_drawdown)
+ggsave("drawdown_curves.png", p_drawdown, width = 11, height = 6, dpi = 180)
+```
+
+```{r}
+#| label: completed-selection-chart
+selection_frequency <- ff_strategy$selection %>% count(ETF, name = "Times_Selected")
+p_selection <- ggplot(selection_frequency,
+  aes(reorder(ETF, Times_Selected), Times_Selected)) +
+  geom_col(fill = "#2B8197") + coord_flip() + theme_minimal() +
+  labs(title = "Fama-French: Number of Monthly Top-5 Selections", x = NULL, y = "Selections")
+print(p_selection)
+ggsave("ff_selection_frequency.png", p_selection, width = 9, height = 5, dpi = 180)
+ggsave("etf_pnl_contribution.png", p_pnl, width = 9, height = 5, dpi = 180)
+ggsave("etf_max_drawdown.png", p_risk, width = 9, height = 5, dpi = 180)
+```
+
+### Interpretation
+
+Quarterly equal weighting keeps exposure diversified across all nine sectors. The FF strategy is more concentrated (five sectors), selects sectors on **historical regression intercepts**, and updates monthly. Thus it may benefit from persistent alpha but may also suffer from estimation noise, turnover, sector concentration, and regime changes. The 63-day regression sample is short. Compare the actual CAGR, drawdown, and selection-frequency results above before concluding whether alpha selection adds value. Results exclude trading costs and use a single historical sample; this is not evidence of out-of-sample profitability.
+
+# 5. What to hand in
+
+Completed analyses in this document:
+
+1. Section 2.2.3: add the maximum drawdown of EW (no re-balance) and SPY, next to the annualized return and Sharpe ratio already computed.
+
+2. Section 2.2.4: rank the nine ETFs by contribution to the PnL and by maximum drawdown over the entire period.
+
+3. Section 3.3: EW with quarterly and annual re-balance. For each, report the same metrics as in 2.2.3 and plot the equity curve against SPY and EW (no re-balance).
+
+4. Section 4: the Fama-French top-5 strategy. Remove the `break`, report the same metrics, plot its equity curve, and explain in a few sentences why it performs differently from EW (quarterly re-balanced).
+
+5. Name the authors and reviewers at the start, and state what is unfinished (see the main assignment instructions).
+
+Submit the rendered HTML, the `.qmd` and data.
+
+# 6. Reproducibility and declaration
+
+- **Author / reviewer:** Replace the placeholders in YAML before submission.
+- **Unfinished items:** None in the source code; execution and rendering must be verified on a machine with R, Quarto, and the listed R packages.
+- **Generative AI disclosure:** ChatGPT was used to assist with coding, documentation, and presentation drafting. The team must review and verify the results and comply with course disclosure rules.
+- **Limitations:** Historical, in-sample results; no fees, slippage, taxes, or market impact. Sharpe uses the assignment convention of CAGR / annualized daily volatility with risk-free rate 0.
