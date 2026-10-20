@@ -1,0 +1,9 @@
+.Rhistory
+.RData
+.Rproj.user/
+.quarto/
+*_cache/
+*.Rproj
+.DS_Store
+Thumbs.db
+test_plot.png
